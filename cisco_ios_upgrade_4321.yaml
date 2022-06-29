@@ -1,0 +1,134 @@
+---
+- hosts: bun11r01.net.racqgroup.local
+  gather_facts: false
+  connection: local
+
+  vars:
+    models:
+      "ISR4321/K9":
+        ios_version: "17.6.3a"
+        ios_path: ""
+        ios_archive: "isr4300-universalk9.17.06.03a.SPA.bin"
+        ios_binary: "isr4300-universalk9.17.06.03a.SPA.bin"
+        ios_md5: "7da818b27590d818f7afea3098a92b52"
+        ios_size_kb: 789166
+    server: "10.53.109.145"
+    protocol: "http"
+
+  tasks:
+    - name: Save running config
+      ios_config:
+        save_when: always
+    
+    - name: Gather all legacy facts
+      ios_facts:
+        gather_subset: hardware
+      tags:
+        - facts
+
+    - name: Check Boot path
+      ios_command:
+        commands: 'show boot | i BOOT var'
+      register: bootvar
+      when:
+        - models[ansible_net_model] is defined
+      tags:
+        - bootvar
+
+    - name: Upgarde when non-compliant
+      block:
+        - name: Check if IOS is already present on the bootflash
+          ios_command:
+            commands: 'show bootflash: | include {{ models[ansible_net_model]["ios_archive"] }}'
+          register: dir_bootflash
+          tags:
+            - bootflash
+
+        - name: Asset that there is enough bootflash space for upload
+          assert:
+            that:
+              - ansible_net_filesystems_info['bootflash:']['spacefree_kb'] > models[ansible_net_model]["ios_size_kb"]
+            msg: "There is not enough space left on the device's bootbootflash"
+          when:
+            - models[ansible_net_model]["ios_archive"] not in dir_bootflash.stdout[0]
+          tags:
+            - bootflash
+
+        - name: Start Copy from Server
+          ios_command:
+            commands: 
+              - command: copy {{ protocol }}://{{ server }}:8000/{{ models[ansible_net_model]["ios_path"] }}{{ models[ansible_net_model]["ios_archive"] }} bootflash:/
+                prompt: 'Destination filename \[{{ models[ansible_net_model]["ios_archive"] }}\]?'
+                answer: "\r"
+          when: 
+            - ansible_net_filesystems_info['bootflash:']['spacefree_kb'] > models[ansible_net_model]["ios_size_kb"] 
+            - ansible_net_model != models[ansible_net_model]["ios_version"]
+            - models[ansible_net_model]["ios_archive"] not in dir_bootflash.stdout[0]
+          vars:
+              ansible_command_timeout: 1800
+          tags:
+            - upload
+
+        - name: Check if IOS is already present on the bootflash
+          ios_command:
+            commands: 'show bootflash: | include {{ models[ansible_net_model]["ios_archive"] }}'
+          register: dir_bootflash
+          tags:
+            - bootflash
+
+        - name: Asset that IOS is present
+          assert:
+            that:
+              - models[ansible_net_model]["ios_archive"] in dir_bootflash.stdout[0]
+          tags:
+            - bootflash
+
+        - name: Check MD5 Hash
+          ios_command:
+            commands:
+              - command: 'verify /md5 bootflash:{{ models[ansible_net_model]["ios_archive"] }}'
+          register: md5_result
+          vars:
+            ansible_command_timeout: 300
+          when:
+            - models[ansible_net_model]["ios_archive"] in dir_bootflash.stdout[0]
+          tags:
+            - md5
+
+        - name: Asset that MD5Sums are identical
+          assert:
+            that:
+              - models[ansible_net_model]["ios_md5"] in md5_result.stdout[0]
+            msg: "IOS File on device MD5Sum is not correct"
+          tags:
+            - md5
+        - name: Change BootVar to new
+          ios_config:
+            lines: 
+            - no boot system 
+            - 'boot system flash bootflash:{{ models[ansible_net_model]["ios_archive"] }}'
+            save_when: always
+      when:  
+        - models[ansible_net_model] is defined
+        - ansible_net_version != models[ansible_net_model]["ios_version"]
+        - models[ansible_net_model]["ios_binary"] not in bootvar.stdout[0]
+
+    - name: Check Boot path
+      ios_command:
+        commands: 'show boot | i BOOT var'
+      register: bootvar
+      when:
+        - models[ansible_net_model] is defined
+        - models[ansible_net_model]["ios_binary"] not in bootvar.stdout[0]
+      tags:
+        - bootvar
+
+    - name: Asset that the boot path is set to the new IOS
+      assert:
+        that:
+          - models[ansible_net_model]["ios_binary"] in bootvar.stdout[0]
+        msg: "Boot path is not set to the new image"
+      when:
+        - models[ansible_net_model] is defined
+      tags:
+        - bootvar
